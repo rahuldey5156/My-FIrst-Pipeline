@@ -146,3 +146,121 @@ while IFS=$'\t' read -r sample r1 r2 group _rest; do
 done < "$SAMPLE_SHEET"
 
 log "  FastQC reports written to: $QC_DIR"
+
+# =============================================================================
+# STEP 3 – QC #2: Parse FastQC summaries; report PASS/WARN/FAIL per sample
+# =============================================================================
+# Each FastQC zip contains summary.txt. We extract it, collate all results
+# into a single QC_summary.txt, and warn loudly if any module FAILs.
+
+log "========== STEP 3: Summarise FastQC results =========="
+
+QC_SUMMARY="${OUT_DIR}/QC_summary.txt"
+printf "%-50s %-40s %s\n" "Sample" "Module" "Result" > "$QC_SUMMARY"
+printf "%s\n" "$(printf '=%.0s' {1..100})"            >> "$QC_SUMMARY"
+
+FAIL_COUNT=0
+
+for zip in "$QC_DIR"/*_fastqc.zip; do
+    [[ -f "$zip" ]] || continue
+    tmpdir=$(mktemp -d)
+    unzip -q "$zip" "*/summary.txt" -d "$tmpdir" 2>/dev/null || {
+        log "  WARNING: Could not extract summary.txt from $zip"
+        rm -rf "$tmpdir"; continue
+    }
+    summary_file=$(find "$tmpdir" -name "summary.txt" | head -1)
+
+    while IFS=$'\t' read -r result module filename; do
+        printf "%-50s %-40s %s\n" "$filename" "$module" "$result" >> "$QC_SUMMARY"
+        if [[ "$result" == "FAIL" ]]; then
+            log "  QC FAIL – $filename : $module"
+            (( FAIL_COUNT++ )) || true
+        fi
+    done < "$summary_file"
+    rm -rf "$tmpdir"
+done
+
+log "  QC summary written to: $QC_SUMMARY"
+if [[ "$FAIL_COUNT" -gt 0 ]]; then
+    log "  WARNING: $FAIL_COUNT module(s) FAILED FastQC. Review $QC_SUMMARY."
+else
+    log "  No hard FAILs in FastQC output."
+fi
+
+# =============================================================================
+# STEP 4 – Build bowtie2 genome index (once only)
+# =============================================================================
+# The genome is split across multiple per-chromosome FASTA files; we first
+# concatenate them into one file, then run bowtie2-build.
+# A sentinel file (.index_built) prevents needless re-indexing on re-runs.
+
+log "========== STEP 4: Build bowtie2 genome index =========="
+
+INDEX_STAMP="${INDEX_DIR}/.index_built"
+
+if [[ -f "$INDEX_STAMP" ]]; then
+    log "  Index already built (delete ${INDEX_STAMP} to force rebuild). Skipping."
+else
+    log "  Concatenating genome FASTAs into: $GENOME_CAT"
+    cat "$GENOME_DIR"/*.fa "$GENOME_DIR"/*.fasta > "$GENOME_CAT" 2>/dev/null || \
+    cat "$GENOME_DIR"/*.fa  > "$GENOME_CAT" 2>/dev/null || \
+    cat "$GENOME_DIR"/*.fasta > "$GENOME_CAT"
+
+    [[ -s "$GENOME_CAT" ]] || { log "ERROR: Concatenated genome FASTA is empty."; exit 1; }
+
+    log "  Running bowtie2-build …"
+    bowtie2-build \
+        --threads "$THREADS" \
+        "$GENOME_CAT" \
+        "$INDEX_PREFIX" \
+        >> "${LOG_DIR}/bowtie2_build.log" 2>&1
+
+    touch "$INDEX_STAMP"
+    log "  Index built: ${INDEX_PREFIX}.*"
+fi
+
+# =============================================================================
+# STEP 5 – Align reads with bowtie2; convert to sorted indexed BAM
+# =============================================================================
+# For each sample:
+#   bowtie2         → paired-end alignment (SAM piped to samtools)
+#   samtools view   → SAM → BAM, discard unmapped reads (-F 4)
+#   samtools sort   → coordinate-sort the BAM
+#   samtools index  → create .bai index required by bedtools
+#
+# bowtie2 flags:
+#   --no-unal        suppress unaligned reads from output (smaller files)
+#   --no-mixed       require both mates to align
+#   --no-discordant  require concordant pairs only (correct orientation/distance)
+
+log "========== STEP 5: Align reads with bowtie2 =========="
+
+while IFS=$'\t' read -r sample r1 r2 group _rest; do
+    [[ "$sample" =~ ^#.*$ ]] && continue
+
+    bam_out="${BAM_DIR}/${sample}.sorted.bam"
+
+    if [[ -f "${bam_out}.bai" ]]; then
+        log "  BAM already exists for ${sample}, skipping."
+        continue
+    fi
+
+    log "  Aligning: ${sample}  (group: ${group})"
+
+    bowtie2 \
+        -x "$INDEX_PREFIX" \
+        -1 "${FASTQ_DIR}/${r1}" \
+        -2 "${FASTQ_DIR}/${r2}" \
+        --no-unal \
+        --no-mixed \
+        --no-discordant \
+        -p "$THREADS" \
+        2>> "${LOG_DIR}/${sample}_bowtie2.log" \
+    | samtools view -bS -F 4 - \
+    | samtools sort -@ "$THREADS" -o "$bam_out" -
+
+    samtools index "$bam_out"
+    log "  Done: ${bam_out}"
+done < "$SAMPLE_SHEET"
+
+log "  All alignments complete. BAMs in: $BAM_DIR"

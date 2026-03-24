@@ -264,3 +264,113 @@ while IFS=$'\t' read -r sample r1 r2 group _rest; do
 done < "$SAMPLE_SHEET"
 
 log "  All alignments complete. BAMs in: $BAM_DIR"
+
+# =============================================================================
+# STEP 6 – Count reads per gene using bedtools coverage
+# =============================================================================
+# bedtools coverage -counts reports how many read alignments overlap each
+# feature (gene) in the BED file.  No-intron assumption means the BED interval
+# represents the full gene body.
+#
+# Raw output: all BED columns + count appended as the last column.
+# Clean output: gene_id (col 4) and count (last col) only — used downstream.
+
+log "========== STEP 6: Count reads per gene =========="
+
+while IFS=$'\t' read -r sample r1 r2 group _rest; do
+    [[ "$sample" =~ ^#.*$ ]] && continue
+
+    bam_in="${BAM_DIR}/${sample}.sorted.bam"
+    counts_raw="${COUNTS_DIR}/${sample}_coverage.txt"
+    counts_clean="${COUNTS_DIR}/${sample}_counts.txt"
+
+    if [[ -f "$counts_clean" ]]; then
+        log "  Counts exist for ${sample}, skipping."
+        continue
+    fi
+
+    log "  Counting reads: ${sample}"
+
+    bedtools coverage \
+        -counts \
+        -a "$BED_FILE" \
+        -b "$bam_in" \
+        > "$counts_raw" \
+        2>> "${LOG_DIR}/${sample}_bedtools.log"
+
+    # Keep only gene_id (col 4) and the count (last col, NF)
+    awk 'BEGIN{OFS="\t"} {print $4, $NF}' "$counts_raw" > "$counts_clean"
+
+    log "  Counts written: $counts_clean"
+done < "$SAMPLE_SHEET"
+
+log "  All count files in: $COUNTS_DIR"
+
+# =============================================================================
+# STEP 7 – Per-group mean counts with gene descriptions
+# =============================================================================
+# Groups are detected automatically from column 4 of the sample sheet,
+# so this step requires no changes if new groups appear in future data.
+#
+# For each group:
+#   1. Collect count files for all samples belonging to that group
+#   2. Use awk to sum counts per gene across replicates, divide by n_files
+#   3. Join with gene descriptions (col 4 = gene_id, col 5 = description
+#      in the BED file — adjust the awk column number if your BED differs)
+#
+# Output: gene_id  mean_count  description  (one file per group)
+
+log "========== STEP 7: Per-group mean expression levels =========="
+
+# -- Extract gene descriptions from the BED file (done once) --
+GENE_DESC="${OUT_DIR}/gene_descriptions.txt"
+if [[ ! -f "$GENE_DESC" ]]; then
+    awk 'BEGIN{OFS="\t"} NF>=5 {print $4, $5}' "$BED_FILE" | sort -u > "$GENE_DESC"
+    log "  Gene descriptions extracted to: $GENE_DESC"
+fi
+
+# -- Detect unique groups from sample sheet column 4 --
+mapfile -t GROUPS < <(awk '!/^#/ && NF>=4 {print $4}' "$SAMPLE_SHEET" | sort -u)
+log "  Groups detected: ${GROUPS[*]}"
+
+for grp in "${GROUPS[@]}"; do
+
+    means_out="${MEANS_DIR}/${grp}_mean_counts.txt"
+    [[ -f "$means_out" ]] && { log "  Means exist for ${grp}, skipping."; continue; }
+
+    log "  Computing means for group: ${grp}"
+
+    # Build list of count files for this group
+    count_files=()
+    while IFS=$'\t' read -r sample _r1 _r2 group _rest; do
+        [[ "$sample" =~ ^#.*$ ]] && continue
+        [[ "$group" == "$grp" ]] && count_files+=( "${COUNTS_DIR}/${sample}_counts.txt" )
+    done < "$SAMPLE_SHEET"
+
+    [[ ${#count_files[@]} -eq 0 ]] && { log "  WARNING: No files for ${grp}. Skipping."; continue; }
+    log "    ${#count_files[@]} replicate(s): ${count_files[*]}"
+
+    # Sum counts across replicates then divide by number of files
+    awk '
+    BEGIN { OFS="\t" }
+    { sum[$1] += $2+0 }
+    END {
+        n = ARGC - 1
+        for (gene in sum)
+            printf "%s\t%.4f\n", gene, sum[gene]/n
+    }
+    ' "${count_files[@]}" | sort -k1,1 > "${MEANS_DIR}/${grp}_means_tmp.txt"
+
+    # Join means with gene descriptions; keep genes with no description too (-a 1)
+    join -t $'\t' -1 1 -2 1 -a 1 \
+        "${MEANS_DIR}/${grp}_means_tmp.txt" \
+        "$GENE_DESC" \
+    | awk 'BEGIN{OFS="\t"; print "gene_id","mean_count","description"}
+           { print $1, $2, (NF>=3 ? $3 : "no_description") }' \
+    > "$means_out"
+
+    rm -f "${MEANS_DIR}/${grp}_means_tmp.txt"
+    log "  Written: $means_out"
+done
+
+log "  Mean count files in: $MEANS_DIR"

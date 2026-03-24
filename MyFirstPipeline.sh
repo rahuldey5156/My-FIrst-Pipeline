@@ -374,3 +374,94 @@ for grp in "${GROUPS[@]}"; do
 done
 
 log "  Mean count files in: $MEANS_DIR"
+
+# =============================================================================
+# STEP 8 – Fold-change calculations for all group-wise comparisons
+# =============================================================================
+# Every ordered pair of groups (A vs B) is compared automatically, so the
+# pipeline handles any new groups that appear in future sample sheets.
+#
+# fold_change = (mean_A + pseudocount) / (mean_B + pseudocount)
+# A pseudocount of 1 is added to avoid division-by-zero and to dampen
+# extreme ratios when counts are very low.  These are indicative only.
+#
+# Output columns (sorted by |fold_change| descending):
+#   gene_id  description  mean_A  mean_B  fold_change_A_over_B
+
+log "========== STEP 8: Fold-change calculations =========="
+
+PSEUDOCOUNT=1
+n_groups=${#GROUPS[@]}
+
+for (( i=0; i<n_groups; i++ )); do
+    for (( j=0; j<n_groups; j++ )); do
+        [[ $i -eq $j ]] && continue
+
+        grpA="${GROUPS[$i]}"
+        grpB="${GROUPS[$j]}"
+        fileA="${MEANS_DIR}/${grpA}_mean_counts.txt"
+        fileB="${MEANS_DIR}/${grpB}_mean_counts.txt"
+
+        if [[ ! -f "$fileA" || ! -f "$fileB" ]]; then
+            log "  WARNING: Missing means file for ${grpA} or ${grpB}. Skipping."
+            continue
+        fi
+
+        fc_out="${FC_DIR}/${grpA}_vs_${grpB}_foldchange.txt"
+        [[ -f "$fc_out" ]] && { log "  FC file exists: $fc_out – skipping."; continue; }
+
+        log "  Fold-change: ${grpA} vs ${grpB}"
+
+        # awk two-file join:
+        #   Pass fileA first (NR==FNR) → load means and descriptions into arrays
+        #   Pass fileB second → compute fold change for each gene
+        #   An extra abs_fc column is used solely for sorting, then removed
+        awk -v pseudo="$PSEUDOCOUNT" \
+        '
+        BEGIN { OFS="\t" }
+
+        # ---- Reading file A ----
+        FNR == NR {
+            if ($1 == "gene_id") next
+            meanA[$1] = $2+0
+            desc[$1]  = (NF>=3) ? $3 : "no_description"
+            next
+        }
+
+        # ---- Reading file B ----
+        {
+            if ($1 == "gene_id") next
+            gene = $1
+            mA   = (gene in meanA) ? meanA[gene] : 0
+            mB   = $2+0
+            fc   = (mA + pseudo) / (mB + pseudo)
+            abs_fc = (fc < 0) ? -fc : fc
+            printf "%s\t%s\t%.4f\t%.4f\t%.4f\t%.4f\n",
+                gene,
+                (gene in desc) ? desc[gene] : "no_description",
+                mA, mB, fc, abs_fc
+        }
+        ' "$fileA" "$fileB" \
+        | sort -t $'\t' -k6,6gr \
+        | awk 'BEGIN{OFS="\t";
+                     print "gene_id","description",\
+                           "mean_'"${grpA}"'","mean_'"${grpB}"'",\
+                           "fold_change_'"${grpA}"'_over_'"${grpB}"'"}
+               {print $1,$2,$3,$4,$5}' \
+        > "$fc_out"
+
+        log "  Written: $fc_out"
+    done
+done
+
+log "  All fold-change files in: $FC_DIR"
+
+# =============================================================================
+# PIPELINE COMPLETE
+# =============================================================================
+
+log "=========================================="
+log "  Pipeline completed successfully!"
+log "  Master log : $LOG_FILE"
+log "  Outputs    : $OUT_DIR"
+log "=========================================="

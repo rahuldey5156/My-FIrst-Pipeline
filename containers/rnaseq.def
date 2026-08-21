@@ -1,0 +1,40 @@
+# containers/rnaseq.def
+# Apptainer definition file for the RNAseq pipeline.
+# Build with:
+#   apptainer build containers/rnaseq.sif containers/rnaseq.def
+#
+# This creates a self-contained image with all tools pre-installed,
+# so the pipeline runs identically on any HPC cluster.
+
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Author Rahul Dey
+    Description RNAseq pipeline tools for T. congolense analysis
+    Tools fastqc, bowtie2, samtools, bedtools, snakemake
+
+%post
+    # Prevent interactive prompts during install
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update && apt-get install -y \
+        fastqc \
+        bowtie2 \
+        samtools \
+        bedtools \
+        python3 \
+        python3-pip \
+        wget \
+        unzip \
+        && apt-get clean
+
+    # Install Python dependencies
+    pip3 install snakemake pandas numpy
+
+%environment
+    export PATH="/usr/bin:$PATH"
+    export LC_ALL=C
+
+%runscript
+    exec "$@"

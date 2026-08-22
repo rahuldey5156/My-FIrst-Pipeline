@@ -1,4 +1,4 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
 # =============================================================================
 # MyFirstPipeline.sh
@@ -16,9 +16,9 @@
 # Pipeline steps:
 #   1. Sanity checks
 #   2. FastQC on all raw paired-end fastq.gz files
-#   3. Parse FastQC summaries → PASS/WARN/FAIL report
+#   3. Parse FastQC summaries -> PASS/WARN/FAIL report
 #   4. Build bowtie2 genome index (once only)
-#   5. Align reads with bowtie2 → sorted indexed BAM
+#   5. Align reads with bowtie2 -> sorted indexed BAM
 #   6. Count reads per gene with bedtools coverage
 #   7. Per-group mean counts with gene descriptions
 #   8. Pairwise fold-change calculations
@@ -33,7 +33,7 @@ set -euo pipefail
 # CONFIGURATION
 # =============================================================================
 
-BASE_DIR="/home/s2793337/BPSM/ICA1/"
+BASE_DIR="/home/s2793337/Optional_ICA1/ICA1"
 FASTQ_DIR="${BASE_DIR}/fastq"
 SAMPLE_SHEET="${BASE_DIR}/fastq/Tco2.fqfiles"
 GENOME_DIR="${BASE_DIR}/Tcongo_genome"
@@ -80,7 +80,7 @@ LOG_READY=1
 log "Output directories created under ${OUT_DIR}"
 
 # =============================================================================
-# STEP 1 – SANITY CHECKS
+# STEP 1 - SANITY CHECKS
 # =============================================================================
 # Verify tools, paths, sample sheet format, fastq files, and genome files
 # are all present before running anything expensive.
@@ -115,8 +115,8 @@ if [[ ! -s "$SAMPLE_SHEET" ]]; then
 fi
 
 awk '
-    /^#/          { next }           # skip comment lines
-    /^SampleName/ { next }           # skip header line
+    /^#/          { next }
+    /^SampleName/ { next }
     NF < 7        { print NR": "$0; err=1 }
     END           { exit err+0 }
 ' "$SAMPLE_SHEET" || {
@@ -128,7 +128,7 @@ log "  Sample sheet format OK (7 columns)."
 # -- 1d. All fastq files referenced in sample sheet must exist --
 # Columns 6 (End1) and 7 (End2) hold the R1 and R2 filenames.
 while IFS=$'\t' read -r sample sampletype replicate time treatment r1 r2; do
-    [[ "$sample" =~ ^#.*$    ]] && continue
+    [[ "$sample" =~ ^#.*$      ]] && continue
     [[ "$sample" == "SampleName" ]] && continue
     for fq in "$FASTQ_DIR/$r1" "$FASTQ_DIR/$r2"; do
         if [[ ! -f "$fq" ]]; then
@@ -151,7 +151,7 @@ log "  Genome files found: ${#genome_files[@]} file(s)."
 log "  All sanity checks passed."
 
 # =============================================================================
-# STEP 2 – QC #1: FastQC on all raw fastq.gz files
+# STEP 2 - QC #1: FastQC on all raw fastq.gz files
 # =============================================================================
 # Runs FastQC on every R1 and R2 file listed in the sample sheet.
 # Skips files whose output zip already exists so re-runs are safe.
@@ -159,12 +159,11 @@ log "  All sanity checks passed."
 log "========== STEP 2: FastQC =========="
 
 while IFS=$'\t' read -r sample sampletype replicate time treatment r1 r2; do
-    [[ "$sample" =~ ^#.*$    ]] && continue
+    [[ "$sample" =~ ^#.*$      ]] && continue
     [[ "$sample" == "SampleName" ]] && continue
 
     for fq in "$r1" "$r2"; do
         fq_path="${FASTQ_DIR}/${fq}"
-        # Derive expected FastQC zip name (FastQC strips .fq.gz / .fastq.gz)
         base="${fq%.fq.gz}"; base="${base%.fastq.gz}"
         zip_out="${QC_DIR}/${base}_fastqc.zip"
 
@@ -186,7 +185,7 @@ done < "$SAMPLE_SHEET"
 log "  FastQC reports written to: $QC_DIR"
 
 # =============================================================================
-# STEP 3 – QC #2: Parse FastQC summaries; report PASS/WARN/FAIL per sample
+# STEP 3 - QC #2: Parse FastQC summaries; report PASS/WARN/FAIL per sample
 # =============================================================================
 # Each FastQC zip contains summary.txt listing module results.
 # We extract and collate these into a single QC_summary.txt and warn
@@ -212,7 +211,7 @@ for zip in "$QC_DIR"/*_fastqc.zip; do
     while IFS=$'\t' read -r result module filename; do
         printf "%-50s %-40s %s\n" "$filename" "$module" "$result" >> "$QC_SUMMARY"
         if [[ "$result" == "FAIL" ]]; then
-            log "  QC FAIL – $filename : $module"
+            log "  QC FAIL - $filename : $module"
             (( FAIL_COUNT++ )) || true
         fi
     done < "$summary_file"
@@ -227,7 +226,7 @@ else
 fi
 
 # =============================================================================
-# STEP 4 – Build bowtie2 genome index (once only)
+# STEP 4 - Build bowtie2 genome index (once only)
 # =============================================================================
 # The genome may be gzipped (.fasta.gz). We decompress and concatenate all
 # genome files into one FASTA, then run bowtie2-build.
@@ -242,7 +241,6 @@ if [[ -f "$INDEX_STAMP" ]]; then
 else
     log "  Decompressing and concatenating genome FASTA(s) into: $GENOME_CAT"
 
-    # Handle both plain and gzipped FASTA files
     for f in "$GENOME_DIR"/*.fasta.gz "$GENOME_DIR"/*.fa.gz \
               "$GENOME_DIR"/*.fasta    "$GENOME_DIR"/*.fa; do
         [[ -f "$f" ]] || continue
@@ -257,7 +255,7 @@ else
         exit 1
     fi
 
-    log "  Running bowtie2-build (this may take a few minutes) …"
+    log "  Running bowtie2-build (this may take a few minutes) ..."
     bowtie2-build \
         --threads "$THREADS" \
         "$GENOME_CAT" \
@@ -269,13 +267,13 @@ else
 fi
 
 # =============================================================================
-# STEP 5 – Align reads with bowtie2; convert to sorted indexed BAM
+# STEP 5 - Align reads with bowtie2; convert to sorted indexed BAM
 # =============================================================================
 # For each sample:
-#   bowtie2        → paired-end alignment, SAM piped to samtools
-#   samtools view  → SAM → BAM, discard unmapped reads (-F 4)
-#   samtools sort  → coordinate-sort the BAM
-#   samtools index → create .bai index required by bedtools
+#   bowtie2        -> paired-end alignment, SAM piped to samtools
+#   samtools view  -> SAM -> BAM, discard unmapped reads (-F 4)
+#   samtools sort  -> coordinate-sort the BAM
+#   samtools index -> create .bai index required by bedtools
 #
 # bowtie2 flags chosen:
 #   --no-unal       : suppress unaligned reads (smaller output)
@@ -285,10 +283,9 @@ fi
 log "========== STEP 5: Align reads with bowtie2 =========="
 
 while IFS=$'\t' read -r sample sampletype replicate time treatment r1 r2; do
-    [[ "$sample" =~ ^#.*$    ]] && continue
+    [[ "$sample" =~ ^#.*$      ]] && continue
     [[ "$sample" == "SampleName" ]] && continue
 
-    # Build group label: SampleType_Treatment_TTime  e.g. Clone1_induced_T24
     group="${sampletype}_${treatment}_T${time}"
     bam_out="${BAM_DIR}/${sample}.sorted.bam"
 
@@ -318,19 +315,19 @@ done < "$SAMPLE_SHEET"
 log "  All alignments complete. BAMs in: $BAM_DIR"
 
 # =============================================================================
-# STEP 6 – Count reads per gene using bedtools coverage
+# STEP 6 - Count reads per gene using bedtools coverage
 # =============================================================================
 # bedtools coverage -counts reports how many read alignments overlap each
 # gene feature in the BED file.
 # Assumption: no introns, so the BED interval = full gene body.
 #
 # Raw output : all BED columns + count as the last column
-# Clean output: gene_id (col 4) and count (last col) only — used downstream
+# Clean output: gene_id (col 4) and count (last col) only
 
 log "========== STEP 6: Count reads per gene =========="
 
 while IFS=$'\t' read -r sample sampletype replicate time treatment r1 r2; do
-    [[ "$sample" =~ ^#.*$    ]] && continue
+    [[ "$sample" =~ ^#.*$      ]] && continue
     [[ "$sample" == "SampleName" ]] && continue
 
     bam_in="${BAM_DIR}/${sample}.sorted.bam"
@@ -351,7 +348,6 @@ while IFS=$'\t' read -r sample sampletype replicate time treatment r1 r2; do
         >  "$counts_raw" \
         2>> "${LOG_DIR}/${sample}_bedtools.log"
 
-    # Extract gene_id (col 4) and count (last column, NF)
     awk 'BEGIN{OFS="\t"} {print $4, $NF}' "$counts_raw" > "$counts_clean"
 
     log "  Counts written: $counts_clean"
@@ -360,9 +356,9 @@ done < "$SAMPLE_SHEET"
 log "  All count files in: $COUNTS_DIR"
 
 # =============================================================================
-# STEP 7 – Per-group mean counts with gene descriptions
+# STEP 7 - Per-group mean counts with gene descriptions
 # =============================================================================
-# Groups are built dynamically from the sample sheet as SampleType_Treatment_TTime,
+# Groups are built dynamically from the sample sheet as SampleType_Treatment_TTime
 # so no code changes are needed if new samples are added.
 #
 # For each group:
@@ -370,8 +366,6 @@ log "  All count files in: $COUNTS_DIR"
 #   2. AWK sums counts per gene across replicates, divides by n files
 #   3. Join with gene descriptions from the BED file
 #      (col 4 = gene_id, col 5 = description)
-#
-# Output: gene_id  mean_count  description  (one file per group)
 
 log "========== STEP 7: Per-group mean expression levels =========="
 
@@ -383,7 +377,6 @@ if [[ ! -f "$GENE_DESC" ]]; then
 fi
 
 # -- Detect all unique group labels from the sample sheet --
-# Groups are built the same way as in the alignment/counting loops
 mapfile -t GROUPS < <(
     awk '
         /^#/          { next }
@@ -400,10 +393,9 @@ for grp in "${GROUPS[@]}"; do
 
     log "  Computing means for group: ${grp}"
 
-    # Collect count files for all samples belonging to this group
     count_files=()
     while IFS=$'\t' read -r sample sampletype replicate time treatment r1 r2; do
-        [[ "$sample" =~ ^#.*$    ]] && continue
+        [[ "$sample" =~ ^#.*$      ]] && continue
         [[ "$sample" == "SampleName" ]] && continue
         g="${sampletype}_${treatment}_T${time}"
         [[ "$g" == "$grp" ]] && count_files+=( "${COUNTS_DIR}/${sample}_counts.txt" )
@@ -415,7 +407,6 @@ for grp in "${GROUPS[@]}"; do
     fi
     log "    ${#count_files[@]} replicate(s): ${count_files[*]}"
 
-    # Sum counts per gene across all replicate files, then divide by n files
     awk '
     BEGIN { OFS="\t" }
     { sum[$1] += $2+0 }
@@ -426,7 +417,6 @@ for grp in "${GROUPS[@]}"; do
     }
     ' "${count_files[@]}" | sort -k1,1 > "${MEANS_DIR}/${grp}_means_tmp.txt"
 
-    # Join with gene descriptions; -a 1 keeps genes even if no description found
     join -t $'\t' -1 1 -2 1 -a 1 \
         "${MEANS_DIR}/${grp}_means_tmp.txt" \
         "$GENE_DESC" \
@@ -442,14 +432,12 @@ done
 log "  Mean count files in: $MEANS_DIR"
 
 # =============================================================================
-# STEP 8 – Fold-change calculations for all group-wise comparisons
+# STEP 8 - Fold-change calculations for all group-wise comparisons
 # =============================================================================
-# Every ordered pair of groups (A vs B) is compared automatically, so
-# any new groups added to the sample sheet are handled with no code changes.
+# Every ordered pair of groups (A vs B) is compared automatically.
 #
 # fold_change = (mean_A + pseudocount) / (mean_B + pseudocount)
-# Pseudocount of 1 avoids division-by-zero and dampens extreme ratios
-# when counts are very low. These fold-changes are indicative only.
+# Pseudocount of 1 avoids division-by-zero and dampens extreme ratios.
 #
 # Output columns (sorted by |fold_change| descending):
 #   gene_id  description  mean_A  mean_B  fold_change_A_over_B
@@ -474,18 +462,13 @@ for (( i=0; i<n_groups; i++ )); do
         fi
 
         fc_out="${FC_DIR}/${grpA}_vs_${grpB}_foldchange.txt"
-        [[ -f "$fc_out" ]] && { log "  FC file exists: $fc_out – skipping."; continue; }
+        [[ -f "$fc_out" ]] && { log "  FC file exists: $fc_out - skipping."; continue; }
 
         log "  Fold-change: ${grpA} vs ${grpB}"
 
-        # AWK two-file join:
-        #   File A (NR==FNR): load mean counts and descriptions into arrays
-        #   File B          : compute fold-change for each gene
-        #   abs_fc column is used only for sorting, then dropped from output
         awk -v pseudo="$PSEUDOCOUNT" '
         BEGIN { OFS="\t" }
 
-        # ---- Reading file A ----
         FNR == NR {
             if ($1 == "gene_id") next
             meanA[$1] = $2+0
@@ -493,7 +476,6 @@ for (( i=0; i<n_groups; i++ )); do
             next
         }
 
-        # ---- Reading file B ----
         {
             if ($1 == "gene_id") next
             gene = $1

@@ -1,22 +1,25 @@
+# =============================================================================
 # config.yaml
+# =============================================================================
 # All pipeline parameters in one place.
-# Edit this file to point to your data — no need to touch the Snakefile.
+# Edit paths here — no need to touch the Snakefile.
 
-base_dir: "/home/s2793337/Optional_ICA1/ICA1"
-fastq_dir: "/home/s2793337/Optional_ICA1/ICA1/fastq"
+# Input paths
+fastq_dir:    "/home/s2793337/Optional_ICA1/ICA1/fastq"
 sample_sheet: "/home/s2793337/Optional_ICA1/ICA1/fastq/Tco2.fqfiles"
-genome_dir: "/home/s2793337/Optional_ICA1/ICA1/Tcongo_genome"
 genome_fasta: "/home/s2793337/Optional_ICA1/ICA1/Tcongo_genome/TriTrypDB-46_TcongolenseIL3000_2019_Genome.fasta.gz"
-bed_file: "/home/s2793337/Optional_ICA1/ICA1/TriTrypDB-46_TcongolenseIL3000_2019.bed"
+bed_file:     "/home/s2793337/Optional_ICA1/ICA1/TriTrypDB-46_TcongolenseIL3000_2019.bed"
+
+# Output directory
 out_dir: "/home/s2793337/Optional_ICA1/ICA1/pipeline_output"
 
-# bowtie2 index prefix (will be created by the pipeline)
+# bowtie2 index prefix (created by the pipeline)
 index_prefix: "/home/s2793337/Optional_ICA1/ICA1/pipeline_output/bowtie2_index/TcongolenseIL3000"
 
-# Number of threads for alignment and samtools
+# Threads for bowtie2 and samtools
 threads: 4
 
-# Pseudocount added before fold-change division
+# Pseudocount for fold-change calculation
 pseudocount: 1
 
 # Apptainer container image path

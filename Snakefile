@@ -2,49 +2,49 @@
 # Snakefile
 # =============================================================================
 # Snakemake workflow for T. congolense RNAi RNAseq analysis.
+# All pipeline logic is written in pure bash/AWK inside shell: blocks.
+# Python is only used at the top to parse the sample sheet and build
+# the sample/group lists for Snakemake to work with.
 #
-# Rules defined:
-#   all             - target rule: defines final outputs Snakemake must produce
-#   build_index     - decompress genome and build bowtie2 index
-#   fastqc          - run FastQC on each raw fastq file
-#   align           - align each sample with bowtie2, convert to sorted BAM
-#   count_reads     - bedtools coverage to count reads per gene per sample
-#   mean_counts     - per-group mean expression with gene descriptions
-#   fold_changes    - all pairwise fold-change comparisons
+# Usage:
+#   snakemake --configfile config.yaml --cores 4 --dry-run
+#   snakemake --configfile config.yaml --cores 4
+#   sbatch submit_pipeline.slurm
 # =============================================================================
 
-import pandas as pd
+import csv
 import os
 
-# -- Load config --
 configfile: "config.yaml"
 
-# -- Parse sample sheet --
-# Read the sample sheet and build sample metadata.
-# Expected columns: SampleName SampleType Replicate Time Treatment End1 End2
-samples_df = pd.read_csv(
-    config["sample_sheet"],
-    sep="\t",
-    comment="#"
-)
+# =============================================================================
+# PARSE SAMPLE SHEET
+# =============================================================================
 
-# Build a dictionary: sample_name -> {r1, r2, group}
 SAMPLES = {}
-for _, row in samples_df.iterrows():
-    name  = row["SampleName"]
-    group = f"{row['SampleType']}_{row['Treatment']}_T{row['Time']}"
-    SAMPLES[name] = {
-        "r1":    os.path.join(config["fastq_dir"], row["End1"]),
-        "r2":    os.path.join(config["fastq_dir"], row["End2"]),
-        "group": group
-    }
+with open(config["sample_sheet"]) as fh:
+    reader = csv.DictReader(fh, delimiter="\t")
+    for row in reader:
+        if row["SampleName"].startswith("#"):
+            continue
+        if row["SampleName"] == "SampleName":
+            continue
+        name  = row["SampleName"]
+        group = "{}_{}_{}" .format(
+            row["SampleType"],
+            row["Treatment"],
+            "T" + str(row["Time"])
+        )
+        SAMPLES[name] = {
+            "r1":    row["End1"],
+            "r2":    row["End2"],
+            "group": group
+        }
 
-# Get all unique groups
-GROUPS = list(set(s["group"] for s in SAMPLES.values()))
+GROUPS = sorted(set(s["group"] for s in SAMPLES.values()))
 
-# Get all pairwise group combinations for fold-change
 FC_PAIRS = [
-    f"{a}_vs_{b}"
+    "{}_vs_{}".format(a, b)
     for a in GROUPS
     for b in GROUPS
     if a != b
@@ -53,67 +53,50 @@ FC_PAIRS = [
 # =============================================================================
 # RULE: all
 # =============================================================================
-# The 'all' rule defines the final outputs the pipeline must produce.
-# Snakemake works backwards from these targets to figure out which
-# rules to run and in what order.
 
 rule all:
     input:
-        # FastQC reports for every read file
         expand(
-            "{out}/fastqc/{sample}_{end}_fastqc.zip",
-            out=config["out_dir"],
+            os.path.join(config["out_dir"], "fastqc", "{sample}_{end}_fastqc.zip"),
             sample=list(SAMPLES.keys()),
             end=["1", "2"]
         ),
-        # Sorted BAM index for every sample
         expand(
-            "{out}/bam/{sample}.sorted.bam.bai",
-            out=config["out_dir"],
+            os.path.join(config["out_dir"], "bam", "{sample}.sorted.bam.bai"),
             sample=list(SAMPLES.keys())
         ),
-        # Count files for every sample
         expand(
-            "{out}/counts/{sample}_counts.txt",
-            out=config["out_dir"],
+            os.path.join(config["out_dir"], "counts", "{sample}_counts.txt"),
             sample=list(SAMPLES.keys())
         ),
-        # Mean count files for every group
         expand(
-            "{out}/means/{group}_mean_counts.txt",
-            out=config["out_dir"],
+            os.path.join(config["out_dir"], "means", "{group}_mean_counts.txt"),
             group=GROUPS
         ),
-        # Fold-change files for every pair
         expand(
-            "{out}/fold_changes/{pair}_foldchange.txt",
-            out=config["out_dir"],
+            os.path.join(config["out_dir"], "fold_changes", "{pair}_foldchange.txt"),
             pair=FC_PAIRS
-        )
+        ),
+        os.path.join(config["out_dir"], "QC_summary.txt")
 
 # =============================================================================
 # RULE: build_index
 # =============================================================================
-# Decompress the gzipped genome FASTA and build a bowtie2 index.
-# Only runs once — Snakemake skips it if the index already exists.
 
 rule build_index:
     input:
         genome = config["genome_fasta"]
     output:
-        # bowtie2-build creates 6 index files; we track the .1.bt2 as sentinel
-        index = config["index_prefix"] + ".1.bt2",
+        sentinel   = config["index_prefix"] + ".1.bt2",
         genome_cat = config["index_prefix"] + "_genome.fa"
     threads:
         config["threads"]
     log:
-        config["out_dir"] + "/logs/bowtie2_build.log"
+        os.path.join(config["out_dir"], "logs", "bowtie2_build.log")
     shell:
         """
-        # Decompress genome into a single FASTA
         gunzip -c {input.genome} > {output.genome_cat}
 
-        # Build bowtie2 index
         bowtie2-build \
             --threads {threads} \
             {output.genome_cat} \
@@ -124,20 +107,21 @@ rule build_index:
 # =============================================================================
 # RULE: fastqc
 # =============================================================================
-# Run FastQC on each individual fastq.gz file.
-# Snakemake runs this rule independently for each sample and each end,
-# which means it can run them in parallel if resources allow.
 
 rule fastqc:
     input:
-        r1 = lambda wc: SAMPLES[wc.sample]["r1"],
-        r2 = lambda wc: SAMPLES[wc.sample]["r2"]
+        r1 = lambda wc: os.path.join(
+            config["fastq_dir"], SAMPLES[wc.sample]["r1"]),
+        r2 = lambda wc: os.path.join(
+            config["fastq_dir"], SAMPLES[wc.sample]["r2"])
     output:
-        zip_r1 = config["out_dir"] + "/fastqc/{sample}_1_fastqc.zip",
-        zip_r2 = config["out_dir"] + "/fastqc/{sample}_2_fastqc.zip"
+        zip_r1 = os.path.join(
+            config["out_dir"], "fastqc", "{sample}_1_fastqc.zip"),
+        zip_r2 = os.path.join(
+            config["out_dir"], "fastqc", "{sample}_2_fastqc.zip")
     threads: 2
     log:
-        config["out_dir"] + "/logs/{sample}_fastqc.log"
+        os.path.join(config["out_dir"], "logs", "{sample}_fastqc.log")
     shell:
         """
         fastqc \
@@ -149,25 +133,61 @@ rule fastqc:
         """
 
 # =============================================================================
+# RULE: qc_summary
+# =============================================================================
+
+rule qc_summary:
+    input:
+        expand(
+            os.path.join(config["out_dir"], "fastqc", "{sample}_{end}_fastqc.zip"),
+            sample=list(SAMPLES.keys()),
+            end=["1", "2"]
+        )
+    output:
+        summary = os.path.join(config["out_dir"], "QC_summary.txt")
+    shell:
+        """
+        printf "%-50s %-40s %s\n" "Sample" "Module" "Result" \
+            > {output.summary}
+        printf "%100s\n" | tr ' ' '=' >> {output.summary}
+
+        for zip in {config[out_dir]}/fastqc/*_fastqc.zip; do
+            [ -f "$zip" ] || continue
+            tmpdir=$(mktemp -d)
+            unzip -q "$zip" "*/summary.txt" -d "$tmpdir" 2>/dev/null || {{
+                echo "WARNING: Could not extract summary from $zip"
+                rm -rf "$tmpdir"
+                continue
+            }}
+            summary_file=$(find "$tmpdir" -name "summary.txt" | head -1)
+            while IFS=$'\t' read -r result module filename; do
+                printf "%-50s %-40s %s\n" \
+                    "$filename" "$module" "$result" >> {output.summary}
+            done < "$summary_file"
+            rm -rf "$tmpdir"
+        done
+        """
+
+# =============================================================================
 # RULE: align
 # =============================================================================
-# Align paired-end reads with bowtie2.
-# SAM output is piped directly to samtools view (SAM->BAM), then
-# samtools sort, avoiding any temporary files on disk.
-# samtools index creates the .bai file needed by bedtools downstream.
 
 rule align:
     input:
-        r1    = lambda wc: SAMPLES[wc.sample]["r1"],
-        r2    = lambda wc: SAMPLES[wc.sample]["r2"],
-        index = config["index_prefix"] + ".1.bt2"
+        r1       = lambda wc: os.path.join(
+            config["fastq_dir"], SAMPLES[wc.sample]["r1"]),
+        r2       = lambda wc: os.path.join(
+            config["fastq_dir"], SAMPLES[wc.sample]["r2"]),
+        sentinel = config["index_prefix"] + ".1.bt2"
     output:
-        bam = config["out_dir"] + "/bam/{sample}.sorted.bam",
-        bai = config["out_dir"] + "/bam/{sample}.sorted.bam.bai"
+        bam = os.path.join(
+            config["out_dir"], "bam", "{sample}.sorted.bam"),
+        bai = os.path.join(
+            config["out_dir"], "bam", "{sample}.sorted.bam.bai")
     threads:
         config["threads"]
     log:
-        config["out_dir"] + "/logs/{sample}_bowtie2.log"
+        os.path.join(config["out_dir"], "logs", "{sample}_bowtie2.log")
     shell:
         """
         bowtie2 \
@@ -188,18 +208,19 @@ rule align:
 # =============================================================================
 # RULE: count_reads
 # =============================================================================
-# Use bedtools coverage to count reads overlapping each gene in the BED file.
-# Extracts gene_id (col 4) and count (last col) into a clean two-column file.
 
 rule count_reads:
     input:
-        bam = config["out_dir"] + "/bam/{sample}.sorted.bam",
-        bai = config["out_dir"] + "/bam/{sample}.sorted.bam.bai",
+        bam = os.path.join(
+            config["out_dir"], "bam", "{sample}.sorted.bam"),
+        bai = os.path.join(
+            config["out_dir"], "bam", "{sample}.sorted.bam.bai"),
         bed = config["bed_file"]
     output:
-        counts = config["out_dir"] + "/counts/{sample}_counts.txt"
+        counts = os.path.join(
+            config["out_dir"], "counts", "{sample}_counts.txt")
     log:
-        config["out_dir"] + "/logs/{sample}_bedtools.log"
+        os.path.join(config["out_dir"], "logs", "{sample}_bedtools.log")
     shell:
         """
         bedtools coverage \
@@ -214,41 +235,98 @@ rule count_reads:
 # =============================================================================
 # RULE: mean_counts
 # =============================================================================
-# For each group, collect all replicate count files and compute per-gene means.
-# Calls an external Python helper script for the calculation and description join.
 
 rule mean_counts:
     input:
-        # Collect count files for all samples belonging to this group
         counts = lambda wc: [
-            config["out_dir"] + f"/counts/{s}_counts.txt"
+            os.path.join(config["out_dir"], "counts", "{}_counts.txt".format(s))
             for s, info in SAMPLES.items()
             if info["group"] == wc.group
         ],
         bed = config["bed_file"]
     output:
-        means = config["out_dir"] + "/means/{group}_mean_counts.txt"
-    log:
-        config["out_dir"] + "/logs/{group}_means.log"
-    script:
-        "scripts/mean_counts.py"
+        means = os.path.join(
+            config["out_dir"], "means", "{group}_mean_counts.txt")
+    shell:
+        """
+        gene_desc=$(mktemp)
+        awk 'BEGIN{{OFS="\t"}} NF>=5 {{print $4, $5}}' {input.bed} \
+            | sort -u > "$gene_desc"
+
+        means_tmp=$(mktemp)
+        awk '
+        BEGIN {{ OFS="\t" }}
+        {{ sum[$1] += $2+0 }}
+        END {{
+            n = ARGC - 1
+            for (gene in sum)
+                printf "%s\t%.4f\n", gene, sum[gene]/n
+        }}
+        ' {input.counts} | sort -k1,1 > "$means_tmp"
+
+        join -t $'\t' -1 1 -2 1 -a 1 "$means_tmp" "$gene_desc" \
+        | awk '
+            BEGIN {{ OFS="\t"; print "gene_id","mean_count","description" }}
+            {{ print $1, $2, (NF>=3 ? $3 : "no_description") }}
+        ' > {output.means}
+
+        rm -f "$means_tmp" "$gene_desc"
+        """
 
 # =============================================================================
 # RULE: fold_changes
 # =============================================================================
-# Compute fold-changes for one group-pair (encoded in the wildcard as A_vs_B).
-# Calls an external Python helper script.
 
 rule fold_changes:
     input:
-        # Parse the pair name to find the two means files needed
-        fileA = lambda wc: config["out_dir"] + "/means/" + wc.pair.split("_vs_")[0] + "_mean_counts.txt",
-        fileB = lambda wc: config["out_dir"] + "/means/" + wc.pair.split("_vs_")[1] + "_mean_counts.txt"
+        fileA = lambda wc: os.path.join(
+            config["out_dir"], "means",
+            wc.pair.split("_vs_")[0] + "_mean_counts.txt"),
+        fileB = lambda wc: os.path.join(
+            config["out_dir"], "means",
+            wc.pair.split("_vs_")[1] + "_mean_counts.txt")
     output:
-        fc = config["out_dir"] + "/fold_changes/{pair}_foldchange.txt"
+        fc = os.path.join(
+            config["out_dir"], "fold_changes", "{pair}_foldchange.txt")
     params:
         pseudocount = config["pseudocount"]
-    log:
-        config["out_dir"] + "/logs/{pair}_fc.log"
-    script:
-        "scripts/fold_changes.py"
+    shell:
+        """
+        pair="{wildcards.pair}"
+        grpA="${{pair%%_vs_*}}"
+        grpB="${{pair##*_vs_}}"
+
+        awk -v pseudo="{params.pseudocount}" \
+            -v grpA="$grpA" \
+            -v grpB="$grpB" '
+        BEGIN {{ OFS="\t" }}
+
+        FNR == NR {{
+            if ($1 == "gene_id") next
+            meanA[$1] = $2+0
+            desc[$1]  = (NF>=3) ? $3 : "no_description"
+            next
+        }}
+
+        {{
+            if ($1 == "gene_id") next
+            gene = $1
+            mA   = (gene in meanA) ? meanA[gene] : 0
+            mB   = $2+0
+            fc   = (mA + pseudo) / (mB + pseudo)
+            abs_fc = (fc < 0) ? -fc : fc
+            printf "%s\t%s\t%.4f\t%.4f\t%.4f\t%.4f\n",
+                gene,
+                (gene in desc) ? desc[gene] : "no_description",
+                mA, mB, fc, abs_fc
+        }}
+        ' {input.fileA} {input.fileB} \
+        | sort -t $'\t' -k6,6gr \
+        | awk -v a="$grpA" -v b="$grpB" '
+            BEGIN {{
+                OFS="\t"
+                print "gene_id","description","mean_"a,"mean_"b,"fold_change_"a"_over_"b
+            }}
+            {{ print $1,$2,$3,$4,$5 }}
+        ' > {output.fc}
+        """
